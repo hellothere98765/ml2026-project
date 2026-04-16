@@ -263,14 +263,6 @@ def train(save_dir="versions", save_every=5, d_model = 256, num_heads = 8, hidde
             epoch_tokens += non_pad
             step+=1
 
-            if (batch_id + 1) % 500 == 0:
-                avg = epoch_loss / max(epoch_tokens, 1)
-                elapsed = time.time() - start_time
-                print(
-                    f"Epoch {epoch:>3} | Step {step:>7} | "
-                    f"Batch {batch_id+1:>6} | Loss {avg:.4f} | "
-                    f" {elapsed:.1f}s"
-                )
 
 
         train_loss = epoch_loss/max(epoch_tokens, 1)
