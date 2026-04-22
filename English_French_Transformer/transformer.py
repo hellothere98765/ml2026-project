@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import sentencepiece as spm
 from torch.nn.utils.rnn import pad_sequence
+import random
 import time
 from torch.utils.data import IterableDataset, DataLoader
 import torch.nn.functional as F
@@ -148,9 +149,12 @@ class Transformer(nn.Module):
         self.initialize()
     
     def initialize(self):
-        for p in self.parameters():
-            if p.dim()>1:
-                nn.init.normal_(p, mean=0, std=.05)
+        for name, p in self.named_parameters():
+            if p.dim() > 1:
+                if 'W_o' in name or 'proj' in name:
+                    nn.init.normal_(p, mean=0, std=0.05 / (2 * self.encoder.layers.__len__()) ** 0.5)
+                else:
+                    nn.init.normal_(p, mean=0, std=0.05)
 
     def encode(self, inp, inp_mask):
         return self.encoder(inp, inp_mask)
@@ -175,18 +179,25 @@ class TranslationDataset(IterableDataset):
         self.csv_path = r"/home/parth/.cache/kagglehub/datasets/dhruvildave/en-fr-translation-dataset/versions/2/en-fr.csv"
         self.max_len = max_len
         self.chunksize = chunksize 
-        self.start = 0
-        self.stop = 20268340
+        self.train = train
+        self.start = 1
+        self.stop = 3157959
         if(not train):
-            self.start = 20268340
-            self.stop = 22520376
-
-
+            self.start = 3157959
+            self.stop = 3508844
+        #Actual size of pd array seems to be 3508844
+        """self.start = random.randint(0, 2807075)
+        self.stop = self.start + 50000
+        if(not self.train):
+            self.start = random.randint(2857075, 2907075)
+            self.stop = self.start + 5000"""
+        
+        
     def __iter__(self):
-        csv_reader = pd.read_csv(self.csv_path, chunksize = self.chunksize, skiprows=range(1,self.start+1), nrows = (self.stop-self.start))#deleted the en,fr line
+        csv_reader = pd.read_csv(self.csv_path, chunksize = self.chunksize, skiprows = self.start, nrows = (self.stop-self.start), header = None, names = ['en', 'fr'])
         for chunk in csv_reader:
             for _, row in chunk.iterrows():
-                eng, frc = row.iloc[0], row.iloc[1]
+                eng, frc = row['en'], row['fr']
 
                 if pd.isna(eng) or pd.isna(frc):
                     continue
@@ -207,7 +218,9 @@ def collate(batch):
 
     return eng_pad, frc_pad
 
-def train(save_dir="versions", save_every=5, d_model = 256, num_heads = 8, hidden_dim = 512, num_layers = 4, dropout = .1, max_len = 512, epochs = 30, batch_size = 16, device = None):
+#def train(save_dir="versions", save_every=1, d_model = 256, num_heads = 8, hidden_dim = 512, num_layers = 12, dropout = .1, max_len = 256, epochs = 30, batch_size = 32, device = None):
+
+def train(save_dir="versions", save_every=1, d_model = 256, num_heads = 8, hidden_dim = 512, num_layers = 12, dropout = .1, max_len = 256, epochs = 50, batch_size = 32, device = None, path = None):
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
@@ -219,23 +232,26 @@ def train(save_dir="versions", save_every=5, d_model = 256, num_heads = 8, hidde
 
     pad_id = 0
 
-    train_dataset = TranslationDataset(sp, max_len = max_len, chunksize= batch_size, train=True)
-
-    train_loader = DataLoader(train_dataset, batch_size = batch_size, collate_fn = collate)
-
-    test_dataset = TranslationDataset(sp, max_len = max_len, chunksize= 10000, train=False)
-
-    test_loader = DataLoader(test_dataset, batch_size = batch_size, collate_fn = collate)
-
-
     translator = Transformer(src_vocab=vocab_size, tgt_vocab = vocab_size, d_model = d_model, num_heads = num_heads, hidden_dim = hidden_dim, num_layers = num_layers, dropout=dropout, max_len = max_len).to(device)
 
-    optimizer = torch.optim.Adam(translator.parameters(), lr = .0005)
+    translator = torch.compile(translator)
 
-    criterion = nn.CrossEntropyLoss(ignore_index=pad_id)
+    optimizer = torch.optim.Adam(translator.parameters(), lr = .0001)
+
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_id, label_smoothing = .1)
 
     step = 0
     for epoch in range(1, epochs+1):
+
+
+        train_dataset = TranslationDataset(sp, max_len = max_len, chunksize= 10000, train=True)
+
+        train_loader = DataLoader(train_dataset, batch_size = batch_size, collate_fn = collate, num_workers = 4, pin_memory = True)
+    
+        test_dataset = TranslationDataset(sp, max_len = max_len, chunksize= 10000, train=False)
+    
+        test_loader = DataLoader(test_dataset, batch_size = batch_size, collate_fn = collate, num_workers = 4, pin_memory = True)
+
         translator.train()
         epoch_loss = 0
         epoch_tokens = 0
@@ -249,8 +265,9 @@ def train(save_dir="versions", save_every=5, d_model = 256, num_heads = 8, hidde
             frc_in = frc[:, :-1]
             frc_out = frc[:, 1:]
 
-            logits = translator(eng, frc_in, pad_id)
-            loss = criterion(logits.reshape(-1, vocab_size), frc_out.reshape(-1))
+            with torch.autocast(device_type = device):
+                logits = translator(eng, frc_in, pad_id)
+                loss = criterion(logits.reshape(-1, vocab_size), frc_out.reshape(-1))
 
             optimizer.zero_grad()
             loss.backward()
@@ -263,6 +280,14 @@ def train(save_dir="versions", save_every=5, d_model = 256, num_heads = 8, hidde
             epoch_tokens += non_pad
             step+=1
 
+            if (batch_id + 1) % 500 == 0:
+                avg = epoch_loss / max(epoch_tokens, 1)
+                elapsed = time.time() - start_time
+                print(
+                    f"Epoch {epoch:>3} | Step {step:>7} | "
+                    f"Batch {batch_id+1:>6} | Loss {avg:.4f} | "
+                    f" {elapsed:.1f}s"
+                )
 
 
         train_loss = epoch_loss/max(epoch_tokens, 1)
@@ -306,6 +331,8 @@ def train(save_dir="versions", save_every=5, d_model = 256, num_heads = 8, hidde
                                 dropout=dropout,
                                 max_len=max_len,
                                 )}, save_path)
+
+        del train_dataset, train_loader, test_dataset, test_loader
         
 
 
