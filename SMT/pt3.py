@@ -15,7 +15,7 @@ def build_refinement_csv(
     sp.Load(spm_path)
 
     data = torch.load(pt_path)
-    top_indices = data["top_indices"]  # (vocab_size, 3)
+    top_indices = data["top_indices"] 
     count=0
     first = True
     for chunk in pd.read_csv(csv_path, chunksize=chunksize):
@@ -29,16 +29,16 @@ def build_refinement_csv(
             if pd.isna(row[en_col]) or pd.isna(row[frc_col]):
                 continue
 
-            # Tokenize English sentence into token IDs
+            
             en_ids = sp.encode(en_text, out_type=int)
 
-            # For each token, look up its top-3 French neighbors
+            
             gloss_ids = []
             for tok_id in en_ids:
-                neighbors = top_indices[tok_id].tolist()  # 3 French token IDs
+                neighbors = top_indices[tok_id].tolist()  
                 gloss_ids.extend(neighbors)
 
-            # Decode gloss IDs back to text
+            
             gloss_text = sp.decode(gloss_ids)
 
             src_sentences.append(gloss_text)
